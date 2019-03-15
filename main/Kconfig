@@ -99,4 +99,88 @@ config ESP_AT_FW_VERSION
 endmenu
 
 menu "BT_ZPL_BRIDGE"
+menu "Bridge UART Settings"
+config BRIDGE_UART_PORT
+    int "uart port number for bridge"
+    default 2
+    range 0 2
+    
+config BRIDGE_UART_PORT_TX_PIN
+    int "uart tx pin for bridge"
+    default 12
+    
+config BRIDGE_UART_PORT_RX_PIN
+    int "uart rx pin for bridge"
+    default 13
+    
+config BRIDGE_UART_BAUDRATE
+    int "uart baud rate for bridge"
+    default 115200
+    range 80 5000000
+    
+endmenu
+
+menu "Buffer Settings"
+config BRIDGE_TX_BUFF_SIZE
+    int "Number of bytes allocated for transmit buffer"
+    default 512
+    
+config BRIDGE_RX_BUFF_SIZE
+    int "Number of bytes allocated for receive buffer"
+    default 1024
+endmenu
+
+menu "Bridge Task Settings"
+menu "Tx Task"
+    choice BRIDGE_TX_PINNED_TO_CORE_CHOICE
+        prompt "The cpu core which this task run"
+        depends on !FREERTOS_UNICORE
+        help
+          Specify the cpu core to run this task.
+        config BRIDGE_TX_TASK_PINNED_TO_CORE_0
+          bool "Core 0 (PRO CPU)"
+        config BRIDGE_TX_TASK_PINNED_TO_CORE_1
+          bool "Core 1 (APP CPU)"
+        config BRIDGE_TX_TASK_NO_CORE_AFFINITY
+          bool "No Affinity (PRO or APP CPU)"
+        depends on !FREERTOS_UNICORE
+    endchoice
+    
+config BRIDGE_TX_TASK_STACK_SIZE
+    int "Stack Size allocated for Bridge TX Task"
+    default 2048
+    
+config BRIDGE_TX_TASK_PRIORITY
+    int "Priority of Bridge TX Task"
+    default 5
+
+endmenu
+
+menu "Rx Task"
+    choice BRIDGE_RX_PINNED_TO_CORE_CHOICE
+        prompt "The cpu core which this task run"
+        depends on !FREERTOS_UNICORE
+        help
+          Specify the cpu core to run this task.
+        config BRIDGE_RX_TASK_PINNED_TO_CORE_0
+          bool "Core 0 (PRO CPU)"
+        config BRIDGE_RX_TASK_PINNED_TO_CORE_1
+          bool "Core 1 (APP CPU)"
+        config BRIDGE_RX_TASK_NO_CORE_AFFINITY
+          bool "No Affinity (PRO or APP CPU)"
+        depends on !FREERTOS_UNICORE
+    endchoice
+    
+config BRIDGE_RX_TASK_STACK_SIZE
+    int "Stack Size allocated for Bridge RX Task"
+    default 2048
+    
+config BRIDGE_RX_TASK_PRIORITY
+    int "Priority of Bridge TX Task"
+    default 4
+
+endmenu #"Rx Task"
+
+endmenu
+
 endmenu

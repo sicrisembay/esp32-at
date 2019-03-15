@@ -13,6 +13,8 @@
 #include "esp_bt_device.h"
 #include "esp_spp_api.h"
 #include "bt_zplBridge.h"
+#include "driver/uart.h"
+#include "freertos/ringbuf.h"
 
 #include "time.h"
 #include "sys/time.h"
@@ -20,29 +22,21 @@
 #define ZPL_BRIDGE_TAG "ZPL_BT_BRIDGE"
 #define SPP_SERVER_NAME "SPP_SERVER"
 #define ZPL_BRIDGE_NAME "ZPL_BT_BRIDGE"
-#define SPP_SHOW_DATA 0
-#define SPP_SHOW_SPEED 1
-#define SPP_SHOW_MODE SPP_SHOW_SPEED    /*Choose show mode: show data or speed*/
 
 static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB;
-
-static struct timeval time_new, time_old;
-static long data_num = 0;
 
 static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_NONE;
 static const esp_spp_role_t role_slave = ESP_SPP_ROLE_SLAVE;
 
-static void print_speed(void)
-{
-    float time_old_s = time_old.tv_sec + time_old.tv_usec / 1000000.0;
-    float time_new_s = time_new.tv_sec + time_new.tv_usec / 1000000.0;
-    float time_interval = time_new_s - time_old_s;
-    float speed = data_num * 8 / time_interval / 1000.0;
-    ESP_LOGI(ZPL_BRIDGE_TAG, "speed(%fs ~ %fs): %f kbit/s" , time_old_s, time_new_s, speed);
-    data_num = 0;
-    time_old.tv_sec = time_new.tv_sec;
-    time_old.tv_usec = time_new.tv_usec;
-}
+static uint32_t bt_initiator_hdl = 0;
+static RingbufHandle_t bridgeTxBuf_handle;
+static RingbufHandle_t bridgeRxBuf_handle;
+static bool bCongest = false;
+static bool bBtWriteDone = true;
+
+static esp_err_t _bridgeUartInit(void);
+static void _TxUartTask(void *pxParam);
+static void _RxUartTask(void *pxParam);
 
 static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
@@ -61,6 +55,8 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         break;
     case ESP_SPP_CLOSE_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_CLOSE_EVT");
+        ESP_LOGI(ZPL_BRIDGE_TAG, "Client Handle=%d", param->close.handle);
+        bt_initiator_hdl = 0;
         break;
     case ESP_SPP_START_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_START_EVT");
@@ -69,27 +65,22 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_CL_INIT_EVT");
         break;
     case ESP_SPP_DATA_IND_EVT:
-#if (SPP_SHOW_MODE == SPP_SHOW_DATA)
-        ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_DATA_IND_EVT len=%d handle=%d",
-                 param->data_ind.len, param->data_ind.handle);
-        esp_log_buffer_hex("",param->data_ind.data,param->data_ind.len);
-#else
-        gettimeofday(&time_new, NULL);
-        data_num += param->data_ind.len;
-        if (time_new.tv_sec - time_old.tv_sec >= 3) {
-            print_speed();
+        ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_DATA_IND_EVT (Client Hdl=%d, data=%d)", param->data_ind.handle, *(param->data_ind.data));
+        if(xRingbufferGetCurFreeSize(bridgeTxBuf_handle) >= param->data_ind.len) {
+            xRingbufferSend(bridgeTxBuf_handle, param->data_ind.data, param->data_ind.len, (TickType_t)0);
         }
-#endif
         break;
     case ESP_SPP_CONG_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_CONG_EVT");
         break;
     case ESP_SPP_WRITE_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_WRITE_EVT");
+        bBtWriteDone = true;
         break;
     case ESP_SPP_SRV_OPEN_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_SRV_OPEN_EVT");
-        gettimeofday(&time_old, NULL);
+        ESP_LOGI(ZPL_BRIDGE_TAG, "client handle=%d new handle=%d", param->srv_open.handle, param->srv_open.new_listen_handle);
+        bt_initiator_hdl = param->srv_open.handle;
         break;
     default:
         break;
@@ -143,6 +134,11 @@ void bt_bridge_init(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK( ret );
+
+    if((ret = _bridgeUartInit()) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Uart Init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
 
@@ -200,4 +196,116 @@ void bt_bridge_init(void)
     esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_VARIABLE;
     esp_bt_pin_code_t pin_code;
     esp_bt_gap_set_pin(pin_type, 0, pin_code);
+}
+
+static esp_err_t _bridgeUartInit(void)
+{
+    esp_err_t ret = ESP_OK;
+    const uart_config_t uart_config = {
+            .baud_rate = CONFIG_BRIDGE_UART_BAUDRATE,
+            .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
+
+    bridgeTxBuf_handle = xRingbufferCreate(CONFIG_BRIDGE_TX_BUFF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if(bridgeTxBuf_handle == NULL) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge tx buff creation failed: %s\n", __func__, "ESP_ERR_NO_MEM");
+        return ESP_ERR_NO_MEM;
+    }
+
+    bridgeRxBuf_handle = xRingbufferCreate(CONFIG_BRIDGE_RX_BUFF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if(bridgeRxBuf_handle == NULL) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge rx buff creation failed: %s\n", __func__, "ESP_ERR_NO_MEM");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if((ret = uart_param_config(CONFIG_BRIDGE_UART_PORT, &uart_config)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s uart config failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    if((ret = uart_set_pin(CONFIG_BRIDGE_UART_PORT,
+                 CONFIG_BRIDGE_UART_PORT_TX_PIN,
+                 CONFIG_BRIDGE_UART_PORT_RX_PIN,
+                 UART_PIN_NO_CHANGE,
+                 UART_PIN_NO_CHANGE)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s uart config pin failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    if((ret = uart_driver_install(CONFIG_BRIDGE_UART_PORT, CONFIG_BRIDGE_RX_BUFF_SIZE, CONFIG_BRIDGE_TX_BUFF_SIZE, 0, NULL, 0)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s uart install failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+#if defined( CONFIG_BRIDGE_TX_TASK_PINNED_TO_CORE_0)
+    if(pdPASS != xTaskCreatePinnedToCore(_TxUartTask, "BridgeUartTx", CONFIG_BRIDGE_TX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_TX_TASK_PRIORITY, NULL, PRO_CPU_NUM)) {
+#elif defined( CONFIG_BRIDGE_TX_TASK_PINNED_TO_CORE_1)
+    if(pdPASS != xTaskCreatePinnedToCore(_TxUartTask, "BridgeUartTx", CONFIG_BRIDGE_TX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_TX_TASK_PRIORITY, NULL, APP_CPU_NUM)) {
+#else
+    if(pdPASS != xTaskCreatePinnedToCore(_TxUartTask, "BridgeUartTx", CONFIG_BRIDGE_TX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_TX_TASK_PRIORITY, NULL, tskNO_AFFINITY)) {
+#endif
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s Tx Task creation failed: %s\n", __func__, "ESP_ERR_NO_MEM");
+        return ESP_ERR_NO_MEM;
+    }
+
+#if defined( CONFIG_BRIDGE_RX_TASK_PINNED_TO_CORE_0)
+    if(pdPASS != xTaskCreatePinnedToCore(_RxUartTask, "BridgeUartRx", CONFIG_BRIDGE_RX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_RX_TASK_PRIORITY, NULL, PRO_CPU_NUM)) {
+#elif defined( CONFIG_BRIDGE_RX_TASK_PINNED_TO_CORE_1)
+    if(pdPASS != xTaskCreatePinnedToCore(_RxUartTask, "BridgeUartRx", CONFIG_BRIDGE_RX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_RX_TASK_PRIORITY, NULL, APP_CPU_NUM)) {
+#else
+    if(pdPASS != xTaskCreatePinnedToCore(_RxUartTask, "BridgeUartRx", CONFIG_BRIDGE_RX_TASK_STACK_SIZE, NULL, CONFIG_BRIDGE_RX_TASK_PRIORITY, NULL, tskNO_AFFINITY)) {
+#endif
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s Rx Task creation failed: %s\n", __func__, "ESP_ERR_NO_MEM");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+/* Received from Bluetooth SPP ---> Transmit to Uart */
+static void _TxUartTask(void *pxParam)
+{
+    uint8_t *pTxData = (uint8_t *)0;
+    size_t nTxData = 0;
+    while(1) {
+        uart_wait_tx_done(CONFIG_BRIDGE_UART_PORT, (TickType_t)portMAX_DELAY);
+        while(1) {
+            pTxData = (uint8_t *)xRingbufferReceiveUpTo(bridgeTxBuf_handle, &nTxData, (TickType_t)(5 / portTICK_RATE_MS), UART_FIFO_LEN);
+            if(pTxData != NULL) {
+                ESP_LOGI(ZPL_BRIDGE_TAG, "%s data to uart tx=%d", __func__, *pTxData);
+                uart_tx_chars(CONFIG_BRIDGE_UART_PORT, (char *)pTxData, nTxData);
+                vRingbufferReturnItem(bridgeTxBuf_handle, (void*)pTxData);
+                break;
+            }
+        }
+    }
+}
+
+/* Received from Uart ---> Transmit via Bluetooth */
+static void _RxUartTask(void *pxParam)
+{
+    uint8_t readBuffer[128];
+    size_t nRxData;
+    bBtWriteDone = true;
+
+    while(1) {
+        /* Receive from UART */
+        nRxData = uart_read_bytes(CONFIG_BRIDGE_UART_PORT, readBuffer, sizeof(readBuffer), (TickType_t)(10 / portTICK_RATE_MS));
+        if(nRxData > 0) {
+            if(bt_initiator_hdl) {
+                ESP_LOGI(ZPL_BRIDGE_TAG, "%s Rx data=%d to bt client=%d", __func__, readBuffer[0], bt_initiator_hdl);
+                while(1) {
+                    if(bBtWriteDone) {
+                        esp_spp_write(bt_initiator_hdl, nRxData, readBuffer);
+                        bBtWriteDone = false;
+                        break;
+                    } else {
+                        vTaskDelay((TickType_t)(5 / portTICK_RATE_MS));
+                    }
+                }
+            }
+        }
+    }
 }

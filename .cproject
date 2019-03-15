@@ -55,6 +55,8 @@
 							<tool id="cdt.managedbuild.tool.gnu.cross.assembler.679191126" name="Cross GCC Assembler" superClass="cdt.managedbuild.tool.gnu.cross.assembler">
 								<option id="gnu.both.asm.option.include.paths.1749741572" name="Include paths (-I)" superClass="gnu.both.asm.option.include.paths" valueType="includePath">
 									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/project_esp/esp-idf/components/bt/bluedroid/api/include/api}&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/project_esp/esp-idf/components/log/include}&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/project_esp/esp-idf/components/freertos/include}&quot;"/>
 								</option>
 								<inputType id="cdt.managedbuild.tool.gnu.assembler.input.1960831466" superClass="cdt.managedbuild.tool.gnu.assembler.input"/>
 							</tool>
