@@ -97,3 +97,6 @@ config ESP_AT_FW_VERSION
       If more than 128 characters, it will be invalid.
 
 endmenu
+
+menu "BT_ZPL_BRIDGE"
+endmenu

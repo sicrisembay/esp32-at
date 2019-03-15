@@ -3,7 +3,7 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := esp-at
+PROJECT_NAME := project_esp
 
 export ESP_AT_PROJECT_PATH := $(PWD)
 export IDF_PATH ?= $(ESP_AT_PROJECT_PATH)/esp-idf

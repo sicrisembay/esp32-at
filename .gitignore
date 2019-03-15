@@ -2,4 +2,3 @@ include/config
 include/sdkconfig.h
 build/
 sdkconfig.old
-sdkconfig
