@@ -15,6 +15,8 @@
 #include "bt_zplBridge.h"
 #include "driver/uart.h"
 #include "freertos/ringbuf.h"
+#include "FreeRTOS_CLI.h"
+#include "bt_zplCmds.h"
 
 #include "time.h"
 #include "sys/time.h"
@@ -37,6 +39,20 @@ static bool bBtWriteDone = true;
 static esp_err_t _bridgeUartInit(void);
 static void _TxUartTask(void *pxParam);
 static void _RxUartTask(void *pxParam);
+
+static const char BT_CTRL_ESCAPE_SEQUENCE[] = {'\4', '\4', '\4', '!'};
+static const uint8_t BT_CTRL_ESCAPE_SEQUENCE_LEN = sizeof(BT_CTRL_ESCAPE_SEQUENCE) / sizeof(BT_CTRL_ESCAPE_SEQUENCE[0]);
+#define BT_CTRL_ESCAPE_SEQUENCE_INTERCHARACTER_DELAY_MS     (TickType_t)(500 / portTICK_RATE_MS)
+static bool bEscapeEnabled = false;
+
+#define CLI_MAX_INPUT_LENGTH        (128)
+#define CLI_MAX_OUTPUT_LENGTH       (256)
+static int8_t pcOutputString[CLI_MAX_OUTPUT_LENGTH];
+static int8_t pcInputString[CLI_MAX_INPUT_LENGTH];
+static const char * const pPromptStr = "BT> ";
+static const char * const pWelcomeStr = "\n\nZPL Bridge Command Line Interface.\n\rType help to view a list of registered commands.\n\r";
+static void SendToConsole(uint8_t *pData, size_t nData);
+
 
 static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
@@ -68,10 +84,13 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_DATA_IND_EVT (Client Hdl=%d, data=%d)", param->data_ind.handle, *(param->data_ind.data));
         if(xRingbufferGetCurFreeSize(bridgeTxBuf_handle) >= param->data_ind.len) {
             xRingbufferSend(bridgeTxBuf_handle, param->data_ind.data, param->data_ind.len, (TickType_t)0);
+        } else {
+            /// TODO: Received BT data ignored due to buffer full
         }
         break;
     case ESP_SPP_CONG_EVT:
-        ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_CONG_EVT");
+        ESP_LOGW(ZPL_BRIDGE_TAG, "ESP_SPP_CONG_EVT");
+        bCongest = true;
         break;
     case ESP_SPP_WRITE_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_WRITE_EVT");
@@ -198,6 +217,32 @@ void bt_bridge_init(void)
     esp_bt_gap_set_pin(pin_type, 0, pin_code);
 }
 
+void bt_bridge_ExitEscapedMode(void)
+{
+    uint8_t *pRxData = (uint8_t *)0;
+    size_t nRxData = 0;
+
+    if(bEscapeEnabled) {
+        /* Flush Rx */
+        pRxData = (uint8_t *)xRingbufferReceiveUpTo(bridgeRxBuf_handle, &nRxData, (TickType_t)(5 / portTICK_RATE_MS), 64);
+        if(pRxData != NULL) {
+            while(1) {
+                if(bBtWriteDone) {
+                    esp_spp_write(bt_initiator_hdl, nRxData, pRxData);
+                    bBtWriteDone = false;
+                    break;
+                } else {
+                    vTaskDelay((TickType_t)(5 / portTICK_RATE_MS));
+                }
+            }
+            vRingbufferReturnItem(bridgeRxBuf_handle, (void*)pRxData);
+        }
+
+        /* Disable Escaped Mode */
+        bEscapeEnabled = false;
+    }
+}
+
 static esp_err_t _bridgeUartInit(void)
 {
     esp_err_t ret = ESP_OK;
@@ -268,16 +313,61 @@ static esp_err_t _bridgeUartInit(void)
 static void _TxUartTask(void *pxParam)
 {
     uint8_t *pTxData = (uint8_t *)0;
+    uint8_t *pRxData = (uint8_t *)0;
     size_t nTxData = 0;
+    size_t nRxData = 0;
+    bEscapeEnabled = false;
+    TickType_t receiveTick;
+    TickType_t receiveLastTick;
+    uint8_t escapeSequencePos;
+
+    receiveTick = xTaskGetTickCount();
+    receiveLastTick = receiveTick;
+    escapeSequencePos = 0;
+
+    bt_zpl_RegisterCommands();
+
     while(1) {
         uart_wait_tx_done(CONFIG_BRIDGE_UART_PORT, (TickType_t)portMAX_DELAY);
         while(1) {
             pTxData = (uint8_t *)xRingbufferReceiveUpTo(bridgeTxBuf_handle, &nTxData, (TickType_t)(5 / portTICK_RATE_MS), UART_FIFO_LEN);
             if(pTxData != NULL) {
+                receiveTick = xTaskGetTickCount();
                 ESP_LOGI(ZPL_BRIDGE_TAG, "%s data to uart tx=%d", __func__, *pTxData);
-                uart_tx_chars(CONFIG_BRIDGE_UART_PORT, (char *)pTxData, nTxData);
-                vRingbufferReturnItem(bridgeTxBuf_handle, (void*)pTxData);
-                break;
+
+                if(bEscapeEnabled == true) {
+                    /* Redirect to ESP32 command line interface */
+                    SendToConsole(pTxData, nTxData);
+                    vRingbufferReturnItem(bridgeTxBuf_handle, (void*)pTxData);
+                } else {
+                    /* Check for Escape Sequence */
+                    if((*pTxData == BT_CTRL_ESCAPE_SEQUENCE[escapeSequencePos]) &&
+                       ((receiveTick - receiveLastTick) > BT_CTRL_ESCAPE_SEQUENCE_INTERCHARACTER_DELAY_MS)) {
+                        escapeSequencePos++;
+                        if(escapeSequencePos >= BT_CTRL_ESCAPE_SEQUENCE_LEN) {
+                            bEscapeEnabled = true;
+                            escapeSequencePos = 0;
+                            ESP_LOGI(ZPL_BRIDGE_TAG, "Escape Sequence Received");
+                            /* Empty the Rx Ring Buffer */
+                            while(NULL != (pRxData = xRingbufferReceiveUpTo(bridgeRxBuf_handle, &nRxData, 0, 64))) {
+                                vRingbufferReturnItem(bridgeRxBuf_handle, (void *)pRxData);
+                            }
+                            /* Send Welcome Message */
+                            xRingbufferSend(bridgeRxBuf_handle, pWelcomeStr, strlen((char *)pWelcomeStr), (TickType_t)0);
+                            xRingbufferSend(bridgeRxBuf_handle, pPromptStr, strlen((char *)pPromptStr), (TickType_t)0);
+                        }
+                    } else {
+                        escapeSequencePos = 0;
+                    }
+
+                    if(bEscapeEnabled != true) {
+                        /* Redirect to ESP32 UART */
+                        uart_tx_chars(CONFIG_BRIDGE_UART_PORT, (char *)pTxData, nTxData);
+                    }
+                    vRingbufferReturnItem(bridgeTxBuf_handle, (void*)pTxData);
+                    break;
+                }
+                receiveLastTick = receiveTick;
             }
         }
     }
@@ -287,23 +377,119 @@ static void _TxUartTask(void *pxParam)
 static void _RxUartTask(void *pxParam)
 {
     uint8_t readBuffer[128];
-    size_t nRxData;
+    uint8_t *pRxData = (uint8_t *)0;
+    size_t nRxData = 0;
     bBtWriteDone = true;
 
     while(1) {
-        /* Receive from UART */
-        nRxData = uart_read_bytes(CONFIG_BRIDGE_UART_PORT, readBuffer, sizeof(readBuffer), (TickType_t)(10 / portTICK_RATE_MS));
-        if(nRxData > 0) {
-            if(bt_initiator_hdl) {
-                ESP_LOGI(ZPL_BRIDGE_TAG, "%s Rx data=%d to bt client=%d", __func__, readBuffer[0], bt_initiator_hdl);
+        if(bEscapeEnabled) {
+            pRxData = (uint8_t *)xRingbufferReceiveUpTo(bridgeRxBuf_handle, &nRxData, (TickType_t)(5 / portTICK_RATE_MS), 64);
+            if(pRxData != NULL) {
                 while(1) {
                     if(bBtWriteDone) {
-                        esp_spp_write(bt_initiator_hdl, nRxData, readBuffer);
+                        esp_spp_write(bt_initiator_hdl, nRxData, pRxData);
                         bBtWriteDone = false;
                         break;
                     } else {
                         vTaskDelay((TickType_t)(5 / portTICK_RATE_MS));
                     }
+                }
+                vRingbufferReturnItem(bridgeRxBuf_handle, (void*)pRxData);
+            }
+        } else {
+            /* Receive from UART */
+            nRxData = uart_read_bytes(CONFIG_BRIDGE_UART_PORT, readBuffer, sizeof(readBuffer), (TickType_t)(10 / portTICK_RATE_MS));
+            if(nRxData > 0) {
+                if(bt_initiator_hdl) {
+                    ESP_LOGI(ZPL_BRIDGE_TAG, "%s Rx data=%d to bt client=%d", __func__, readBuffer[0], bt_initiator_hdl);
+                    while(1) {
+                        if(bBtWriteDone) {
+                            esp_spp_write(bt_initiator_hdl, nRxData, readBuffer);
+                            bBtWriteDone = false;
+                            break;
+                        } else {
+                            vTaskDelay((TickType_t)(5 / portTICK_RATE_MS));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+static void SendToConsole(uint8_t *pData, size_t nData)
+{
+    size_t idx = 0;
+    BaseType_t xMoreDataToFollow;
+    static uint32_t inputIdx = 0;
+
+    for(idx = 0; idx < nData; idx++) {
+        /* Echo */
+        if((pData[idx] != '\n') && (pData[idx] != '\r') && (pData[idx] != '\b')) {
+            xRingbufferSend(bridgeRxBuf_handle, &pData[idx], 1, (TickType_t)0);
+        }
+
+        if( pData[idx] == '\n' ) {
+            /* A newline character was received, so the input command string is
+            complete and can be processed.  Transmit a line separator, just to
+            make the output easier to read. */
+            xRingbufferSend(bridgeRxBuf_handle, (uint8_t *)"\r\n", strlen("\r\n"), (TickType_t)0);
+
+            /* The command interpreter is called repeatedly until it returns
+            pdFALSE.  See the "Implementing a command" documentation for an
+            exaplanation of why this is. */
+            do {
+                /* Send the command string to the command interpreter.  Any
+                output generated by the command interpreter will be placed in the
+                pcOutputString buffer. */
+                xMoreDataToFollow = FreeRTOS_CLIProcessCommand(
+                                          (char *)pcInputString,   /* The command string.*/
+                                          (char *)pcOutputString,  /* The output buffer. */
+                                          CLI_MAX_OUTPUT_LENGTH/* The size of the output buffer. */
+                                      );
+
+                /* Write the output generated by the command interpreter to the
+                console. */
+                xRingbufferSend(bridgeRxBuf_handle, (uint8_t *)pcOutputString, strlen((char *)pcOutputString), (TickType_t)0);
+            } while( xMoreDataToFollow != pdFALSE );
+
+            if(bEscapeEnabled == true) {
+                xRingbufferSend(bridgeRxBuf_handle, (uint8_t *)pPromptStr, strlen((char *)pPromptStr), (TickType_t)0);
+            } else {
+                /* User entered "exit". No need to send prompt */
+                xRingbufferSend(bridgeRxBuf_handle, (uint8_t*)"\n\r", strlen("\n\r"), (TickType_t)0);
+            }
+
+            /* All the strings generated by the input command have been sent.
+            Processing of the command is complete.  Clear the input string ready
+            to receive the next command. */
+            inputIdx = 0;
+            memset( pcInputString, 0x00, CLI_MAX_INPUT_LENGTH );
+        }
+        else
+        {
+            /* The if() clause performs the processing after a newline character
+            is received.  This else clause performs the processing if any other
+            character is received. */
+            if( pData[idx] == '\r' ) {
+                /* Ignore carriage returns. */
+            } else if( pData[idx] == '\b' ) {
+                /* Backspace was pressed.  Erase the last character in the input
+                buffer - if there are any. */
+                if( inputIdx > 0 ) {
+                    inputIdx--;
+                    pcInputString[ inputIdx ] = '\0';
+                    xRingbufferSend(bridgeRxBuf_handle, (uint8_t *)&pData[idx], 1, (TickType_t)0);
+                }
+            } else {
+                /* A character was entered.  It was not a new line, backspace
+                or carriage return, so it is accepted as part of the input and
+                placed into the input buffer.  When a \n is entered the complete
+                string will be passed to the command interpreter. */
+                if( inputIdx < CLI_MAX_INPUT_LENGTH ) {
+                    pcInputString[ inputIdx ] = pData[idx];
+                    inputIdx++;
                 }
             }
         }
