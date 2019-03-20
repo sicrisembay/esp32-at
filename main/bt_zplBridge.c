@@ -37,6 +37,7 @@ static bool bCongest = false;
 static bool bBtWriteDone = true;
 
 static esp_err_t _bridgeUartInit(void);
+static esp_err_t _bridgePinInit(void);
 static void _TxUartTask(void *pxParam);
 static void _RxUartTask(void *pxParam);
 
@@ -50,7 +51,7 @@ static bool bEscapeEnabled = false;
 static int8_t pcOutputString[CLI_MAX_OUTPUT_LENGTH];
 static int8_t pcInputString[CLI_MAX_INPUT_LENGTH];
 static const char * const pPromptStr = "BT> ";
-static const char * const pWelcomeStr = "\n\nZPL Bridge Command Line Interface.\n\rType help to view a list of registered commands.\n\r";
+static const char * const pWelcomeStr = "\n\n\rZPL Bridge Command Line Interface.\n\rType help to view a list of registered commands.\n\r";
 static void SendToConsole(uint8_t *pData, size_t nData);
 
 
@@ -153,6 +154,11 @@ void bt_bridge_init(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK( ret );
+
+    if((ret = _bridgePinInit()) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Pin Init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
 
     if((ret = _bridgeUartInit()) != ESP_OK) {
         ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Uart Init failed: %s\n", __func__, esp_err_to_name(ret));
@@ -306,6 +312,46 @@ static esp_err_t _bridgeUartInit(void)
         ESP_LOGE(ZPL_BRIDGE_TAG, "%s Rx Task creation failed: %s\n", __func__, "ESP_ERR_NO_MEM");
         return ESP_ERR_NO_MEM;
     }
+    return ESP_OK;
+}
+
+static esp_err_t _bridgePinInit(void)
+{
+    esp_err_t ret = ESP_OK;
+    gpio_config_t io_conf;
+
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << CONFIG_BRIDGE_MXRT1052_RESET_PIN);
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    if((ret = gpio_config(&io_conf)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s reset pin init failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+    gpio_set_level(CONFIG_BRIDGE_MXRT1052_RESET_PIN, 1U);
+
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << CONFIG_BRIDGE_DOWNSTREAM_CLIENT_ID_PIN);
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    if((ret = gpio_config(&io_conf)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s client id downstream pin init failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+    gpio_set_level(CONFIG_BRIDGE_DOWNSTREAM_CLIENT_ID_PIN, 0U);
+
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << CONFIG_BRIDGE_UPSTREAM_CLIENT_ID_PIN);
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    if((ret = gpio_config(&io_conf)) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge init pin failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
     return ESP_OK;
 }
 

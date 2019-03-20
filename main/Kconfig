@@ -118,7 +118,22 @@ config BRIDGE_UART_BAUDRATE
     default 115200
     range 80 5000000
     
-endmenu
+endmenu #"Bridge UART Settings"
+
+menu "Miscellaneous Pin Settings"
+config BRIDGE_MXRT1052_RESET_PIN
+    int "output pin used to reset MCU"
+    default 21
+
+config BRIDGE_DOWNSTREAM_CLIENT_ID_PIN
+    int "pin that indicates downstream client ID"
+    default 27
+    
+config BRIDGE_UPSTREAM_CLIENT_ID_PIN
+    int "pin that indicates upstream client ID"
+    default 4
+    
+endmenu #"Miscellaneous Pin Settings"
 
 menu "Buffer Settings"
 config BRIDGE_TX_BUFF_SIZE
