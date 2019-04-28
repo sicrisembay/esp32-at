@@ -19,7 +19,7 @@ export IDF_PATH ?= $(ESP_AT_PROJECT_PATH)/$(IDF_DIR)
 ifeq ($(ESP_AT_PROJECT_PLATFORM), PLATFORM_ESP8266)
 EXTRA_CFLAGS += -DconfigUSE_QUEUE_SETS
 else ifeq ($(ESP_AT_PROJECT_PLATFORM), PLATFORM_ESP32)
-EXTRA_CFLAGS += -DCONFIG_IDF_TARGET_ESP32=1
+EXTRA_CFLAGS += -DCONFIG_TARGET_PLATFORM_ESP32=1
 endif
 
 ESP_AT_MODULE_CONFIG_DIR ?= module_config/module_$(shell echo $(ESP_AT_MODULE_NAME) | tr A-Z a-z)
@@ -39,7 +39,7 @@ esp_at_idf_commit := $(strip $(subst commit:,,$(shell sed -n /commit:/p $(ESP_AT
 esp_at_idf_repository := $(strip $(subst repository:,,$(shell sed -n /repository:/p $(ESP_AT_MODULE_CONFIG_DIR)/IDF_VERSION)))
 
 ifeq (,$(wildcard $(IDF_DIR)))
-$(info $(shell git clone --recursive -b $(esp_at_idf_branch) $(esp_at_idf_repository) $(IDF_PATH); \
+$(info $(shell git clone -b $(esp_at_idf_branch) $(esp_at_idf_repository) $(IDF_PATH); \
 			cd $(IDF_PATH); \
 			git checkout $(esp_at_idf_commit); \
 			git submodule update --init --recursive \
