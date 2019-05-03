@@ -58,11 +58,14 @@ static void SendToConsole(uint8_t *pData, size_t nData);
 static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
     switch (event) {
-    case ESP_SPP_INIT_EVT:
-        ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_INIT_EVT");
-        esp_bt_dev_set_device_name(ZPL_BRIDGE_NAME);
-        esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE);
-        esp_spp_start_srv(sec_mask,role_slave, 0, SPP_SERVER_NAME);
+    case ESP_SPP_INIT_EVT: {
+            char btDevName[33];
+            ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_INIT_EVT");
+            snprintf(btDevName, 32, "ZPL_BT_%02X:%02X:%02X:%02X:%02X:%02X", ESP_BD_ADDR_HEX(esp_bt_dev_get_address()));
+            esp_bt_dev_set_device_name(btDevName);
+            esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE);
+            esp_spp_start_srv(sec_mask,role_slave, 0, SPP_SERVER_NAME);
+        }
         break;
     case ESP_SPP_DISCOVERY_COMP_EVT:
         ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_DISCOVERY_COMP_EVT");
