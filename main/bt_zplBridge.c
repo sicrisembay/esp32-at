@@ -62,6 +62,7 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
             char btDevName[33];
             ESP_LOGI(ZPL_BRIDGE_TAG, "ESP_SPP_INIT_EVT");
             snprintf(btDevName, 32, "ZPL_BT_%02X:%02X:%02X:%02X:%02X:%02X", ESP_BD_ADDR_HEX(esp_bt_dev_get_address()));
+            ESP_LOGI(ZPL_BRIDGE_TAG, "BT Device: %s", btDevName);
             esp_bt_dev_set_device_name(btDevName);
             esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE);
             esp_spp_start_srv(sec_mask,role_slave, 0, SPP_SERVER_NAME);
@@ -158,13 +159,13 @@ void bt_bridge_init(void)
     }
     ESP_ERROR_CHECK( ret );
 
-    if((ret = _bridgePinInit()) != ESP_OK) {
-        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Pin Init failed: %s\n", __func__, esp_err_to_name(ret));
+    if((ret = _bridgeUartInit()) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Uart Init failed: %s\n", __func__, esp_err_to_name(ret));
         return;
     }
 
-    if((ret = _bridgeUartInit()) != ESP_OK) {
-        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Uart Init failed: %s\n", __func__, esp_err_to_name(ret));
+    if((ret = _bridgePinInit()) != ESP_OK) {
+        ESP_LOGE(ZPL_BRIDGE_TAG, "%s bridge Pin Init failed: %s\n", __func__, esp_err_to_name(ret));
         return;
     }
 
@@ -322,6 +323,7 @@ static esp_err_t _bridgePinInit(void)
 {
     esp_err_t ret = ESP_OK;
     gpio_config_t io_conf;
+    int tx_sig;
 
     io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT_OUTPUT;
@@ -332,6 +334,23 @@ static esp_err_t _bridgePinInit(void)
         ESP_LOGE(ZPL_BRIDGE_TAG, "%s reset pin init failed: %s\n", __func__, esp_err_to_name(ret));
         return ret;
     }
+    gpio_set_level(CONFIG_BRIDGE_MXRT1052_RESET_PIN, 0U);
+    vTaskDelay(1000 / portTICK_RATE_MS);
+    /* Set TX to Open drain (MCU Rx pin has pull up to MCU 3.3V) */
+#if(CONFIG_BRIDGE_UART_PORT == 0)
+    tx_sig = U0TXD_OUT_IDX;
+#elif(CONFIG_BRIDGE_UART_PORT == 1)
+    tx_sig = U1TXD_OUT_IDX;
+#elif(CONFIG_BRIDGE_UART_PORT == 2)
+    tx_sig = U2TXD_OUT_IDX;
+#else
+#error "Invalid Bridge Uart Port!"
+#endif
+    gpio_set_level(CONFIG_BRIDGE_UART_PORT_TX_PIN, 1);
+    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[CONFIG_BRIDGE_UART_PORT_TX_PIN], PIN_FUNC_GPIO);
+    gpio_set_direction(CONFIG_BRIDGE_UART_PORT_TX_PIN, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_matrix_out(CONFIG_BRIDGE_UART_PORT_TX_PIN, tx_sig, 0, 0);
+
     gpio_set_level(CONFIG_BRIDGE_MXRT1052_RESET_PIN, 1U);
 
     io_conf.intr_type = GPIO_PIN_INTR_DISABLE;

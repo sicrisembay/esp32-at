@@ -27,6 +27,7 @@ static BaseType_t _prvReset(char *pcWriteBuffer, size_t xWriteBufferLen, const c
     if(gpio_get_level(CONFIG_BRIDGE_MXRT1052_RESET_PIN)) {
         /* Switch off MXRT1052 power */
         gpio_set_level(CONFIG_BRIDGE_MXRT1052_RESET_PIN, 0);
+        vTaskDelay(RESET_DELAY);
         /* Set TX to Open drain (MCU Rx pin has pull up to MCU 3.3V) */
 #if(CONFIG_BRIDGE_UART_PORT == 0)
         tx_sig = U0TXD_OUT_IDX;
