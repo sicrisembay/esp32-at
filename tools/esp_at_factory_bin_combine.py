@@ -29,12 +29,12 @@ import argparse
 ESP_FLASH_MODE = {"QIO": 0, "QOUT": 1, "DIO": 2, "DOUT": 3, "FAST_READ": 4, "SLOW_READ": 5}
 ESP_FLASH_SIZE = {"1MB": 0, "2MB": 1, "4MB": 2, "8MB": 3, "16MB": 4}
 ESP_BIN_SIZE = {"1MB": 1024*1024, "2MB": 2*1024*1024, "4MB": 4*1024*1024, "8MB": 8*1024*1024, "16MB": 16*1024*1024}
-ESP_FLASH_SPEED = {"40M": 0, "26M": 1, "20M": 2, "80M": 3}
+ESP_FLASH_SPEED = {"40M": 0, "26M": 1, "20M": 2, "80M": 0x0F}
 
-def esp32_at_combine_bin(modlule, flash_mode, flash_size, flash_speed, build_dir, parameter_file):
+def esp32_at_combine_bin(module, flash_mode, flash_size, flash_speed, build_dir, parameter_file, download_config):
     bin_data = bytearray([0xFF] * (ESP_BIN_SIZE[flash_size]))
 
-    with open(os.path.join(build_dir, 'download.config')) as f:
+    with open(download_config) as f:
         data = f.read()
         address_list = re.compile(r"0x[\da-fA-F]+ \S+").findall(data)
 
@@ -57,25 +57,24 @@ def esp32_at_combine_bin(modlule, flash_mode, flash_size, flash_speed, build_dir
     if parameter_file != None:
         with open(parameter_file) as f:
             factory_parameter = f.read()
-            modlule_name_list = re.compile(r"\S+ \S+ \S+").findall(factory_parameter)
-            for i, modlule_name_pair in enumerate(modlule_name_list):
-                modlule_name, default_name, bin_file = list(modlule_name_pair.split(' '))
-
-                if modlule == modlule_name:
+            module_name_list = re.compile(r"\S+ \S+ \S+").findall(factory_parameter)
+            for i, module_name_pair in enumerate(module_name_list):
+                module_name, default_name, bin_file = list(module_name_pair.split(' '))
+                if module == module_name:
                     addr = bin_list[default_name]
-                    with open(bin_file) as f:
+                    with open(bin_file, 'rb') as f:
                         data = f.read()
 
                         for i, byte_data in enumerate(data):
                             bin_data[addr + i] = byte_data
 
-                    factory_bin = os.path.join(os.path.dirname(parameter_file), 'factory_' + modlule_name + '.bin')
+                    factory_bin = os.path.join(os.path.dirname(parameter_file), 'factory_' + module_name + '.bin')
                     with open(factory_bin, 'wb') as f:
                         f.write(bin_data)
-                        print("Create %s for %s finished"%(factory_bin, modlule_name))
+                        print("Create %s for %s finished"%(factory_bin, module_name))
     
     else:
-        factory_bin = os.path.join(os.path.dirname(parameter_file), 'factory.bin')
+        factory_bin = os.path.join(build_dir, 'factory.bin')
         with open(factory_bin, 'wb') as f:
             f.write(bin_data)
             print("Create %s finished"%(factory_bin))
@@ -89,10 +88,11 @@ def main():
     parser.add_argument("--flash_speed", default="40M", help="Flash speed: 40M,26M,20M,80M")
     parser.add_argument("--bin_directory", default="build", help="build directory")
     parser.add_argument("--parameter_file", default=None, help="factory parameter file")
+    parser.add_argument("--download_config", default='download.config', help="flash download config file")
     args = parser.parse_args()
 
-    esp32_at_combine_bin(args.module_name.upper(), args.flash_mode.upper(), args.flash_size.upper(), args.flash_speed.upper(), args.bin_directory, args.parameter_file)
-
+    esp32_at_combine_bin(args.module_name.upper(), args.flash_mode.upper(), args.flash_size.upper(), 
+        args.flash_speed.upper(), args.bin_directory, args.parameter_file, args.download_config)
 
 if __name__ == '__main__':
     main()

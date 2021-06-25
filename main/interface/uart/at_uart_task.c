@@ -32,12 +32,23 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#ifdef CONFIG_AT_BASE_ON_UART
 #include "esp_system.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "at_interface.h"
 
-#include "at_default_config.h"
+#ifdef CONFIG_IDF_TARGET_ESP8266
+#include "esp8266/uart_register.h"
+#endif
+
+#ifdef CONFIG_IDF_TARGET_ESP32
+#include "esp32/rom/uart.h"
+#elif CONFIG_IDF_TARGET_ESP32S2
+#include "esp32s2/rom/uart.h"
+#elif CONFIG_IDF_TARGET_ESP32C3
+#include "esp32c3/rom/uart.h"
+#endif
 
 typedef struct {
     int32_t baudrate;
@@ -47,11 +58,63 @@ typedef struct {
     int8_t flow_control;
 } at_nvm_uart_config_struct; 
 
-static const uint8_t esp_at_uart_parity_table[] = {UART_PARITY_DISABLE, UART_PARITY_EVEN, UART_PARITY_ODD};
+typedef struct {
+    int32_t tx;
+    int32_t rx;
+    int32_t cts;
+    int32_t rts;
+} at_uart_pins_t;
 
-static QueueHandle_t esp_at_uart_queue = NULL;
 static bool at_default_flag = false;
+static at_uart_pins_t s_at_uart_port_pin;
+static QueueHandle_t esp_at_uart_queue = NULL;
+static const uint8_t esp_at_uart_parity_table[] = {UART_PARITY_DISABLE, UART_PARITY_ODD, UART_PARITY_EVEN};
 
+#if defined(CONFIG_IDF_TARGET_ESP32)
+#define CONFIG_AT_UART_PORT_TX_PIN_DEFAULT          17
+#define CONFIG_AT_UART_PORT_RX_PIN_DEFAULT          16
+#define CONFIG_AT_UART_PORT_CTS_PIN_DEFAULT         15
+#define CONFIG_AT_UART_PORT_RTS_PIN_DEFAULT         14
+#ifndef CONFIG_AT_UART_PORT
+#define CONFIG_AT_UART_PORT                         UART_NUM_1
+#endif
+#define AT_UART_BAUD_RATE_MAX                  5000000
+#define AT_UART_BAUD_RATE_MIN                       80
+#elif defined(CONFIG_IDF_TARGET_ESP8266)
+#define CONFIG_AT_UART_PORT_TX_PIN_DEFAULT          15
+#define CONFIG_AT_UART_PORT_RX_PIN_DEFAULT          13
+#define CONFIG_AT_UART_PORT_CTS_PIN_DEFAULT         3
+#define CONFIG_AT_UART_PORT_RTS_PIN_DEFAULT         1
+#ifndef CONFIG_AT_UART_PORT
+#define CONFIG_AT_UART_PORT                         UART_NUM_0
+#endif
+#define AT_UART_BAUD_RATE_MAX                  4500000
+#define AT_UART_BAUD_RATE_MIN                       80
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+#define CONFIG_AT_UART_PORT_TX_PIN_DEFAULT          17
+#define CONFIG_AT_UART_PORT_RX_PIN_DEFAULT          18
+#define CONFIG_AT_UART_PORT_CTS_PIN_DEFAULT         20
+#define CONFIG_AT_UART_PORT_RTS_PIN_DEFAULT         19
+#ifndef CONFIG_AT_UART_PORT
+#define CONFIG_AT_UART_PORT                         UART_NUM_1
+#endif
+#define AT_UART_BAUD_RATE_MAX                  5000000
+#define AT_UART_BAUD_RATE_MIN                       80
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+#define CONFIG_AT_UART_PORT_TX_PIN_DEFAULT          7
+#define CONFIG_AT_UART_PORT_RX_PIN_DEFAULT          6
+#define CONFIG_AT_UART_PORT_CTS_PIN_DEFAULT         5
+#define CONFIG_AT_UART_PORT_RTS_PIN_DEFAULT         4
+#ifndef CONFIG_AT_UART_PORT
+#define CONFIG_AT_UART_PORT                         UART_NUM_1
+#endif
+#define AT_UART_BAUD_RATE_MAX                  5000000
+#define AT_UART_BAUD_RATE_MIN                       80
+#endif
+
+#define AT_UART_PATTERN_TIMEOUT_MS                  20
+
+static uart_port_t esp_at_uart_port = CONFIG_AT_UART_PORT;
 
 static bool at_nvm_uart_config_set (at_nvm_uart_config_struct *uart_config);
 static bool at_nvm_uart_config_get (at_nvm_uart_config_struct *uart_config);
@@ -61,7 +124,7 @@ static int32_t at_port_write_data(uint8_t*data,int32_t len)
 {
     uint32_t length = 0;
 
-    length = uart_write_bytes(CONFIG_AT_UART_PORT,(char*)data,len);
+    length = uart_write_bytes(esp_at_uart_port,(char*)data,len);
     return length;
 }
 
@@ -77,7 +140,7 @@ static int32_t at_port_read_data(uint8_t*buf,int32_t len)
 
     if (buf == NULL) {
         if (len == -1) {
-            if (ESP_OK != uart_get_buffered_data_len(CONFIG_AT_UART_PORT,&size)) {
+            if (ESP_OK != uart_get_buffered_data_len(esp_at_uart_port,&size)) {
                 return -1;
             }
             len = size;
@@ -89,27 +152,27 @@ static int32_t at_port_read_data(uint8_t*buf,int32_t len)
 
         data = (uint8_t *)malloc(len);
         if (data) {
-            len = uart_read_bytes(CONFIG_AT_UART_PORT,data,len,ticks_to_wait);
+            len = uart_read_bytes(esp_at_uart_port,data,len,ticks_to_wait);
             free(data);
             return len;
         } else {
             return -1;
         }
     } else {
-        return uart_read_bytes(CONFIG_AT_UART_PORT,buf,len,ticks_to_wait);
+        return uart_read_bytes(esp_at_uart_port,buf,len,ticks_to_wait);
     }
 }
 
 static int32_t at_port_get_data_length (void)
 {
     size_t size = 0;
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
+#ifndef CONFIG_IDF_TARGET_ESP8266
     int pattern_pos = 0;
 #endif
 
-    if (ESP_OK == uart_get_buffered_data_len(CONFIG_AT_UART_PORT,&size)) {
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
-        pattern_pos = uart_pattern_get_pos(CONFIG_AT_UART_PORT);
+    if (ESP_OK == uart_get_buffered_data_len(esp_at_uart_port,&size)) {
+#ifndef CONFIG_IDF_TARGET_ESP8266
+        pattern_pos = uart_pattern_get_pos(esp_at_uart_port);
         if (pattern_pos >= 0) {
             size = pattern_pos;
         }
@@ -122,7 +185,7 @@ static int32_t at_port_get_data_length (void)
 
 static bool at_port_wait_write_complete (int32_t timeout_msec)
 {
-    if (ESP_OK == uart_wait_tx_done(CONFIG_AT_UART_PORT, timeout_msec*portTICK_PERIOD_MS)) {
+    if (ESP_OK == uart_wait_tx_done(esp_at_uart_port, timeout_msec / portTICK_PERIOD_MS)) {
         return true;
     }
 
@@ -134,7 +197,7 @@ static void uart_task(void *pvParameters)
     uart_event_t event;
     uint32_t data_len = 0;
     BaseType_t retry_flag = pdFALSE;
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
+#ifndef CONFIG_IDF_TARGET_ESP8266
     int pattern_pos = -1;
     uint8_t *data = NULL;
 #endif
@@ -165,22 +228,38 @@ retry:
                     goto retry;
                 }
                 break;
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
+#ifndef CONFIG_IDF_TARGET_ESP8266
             case UART_PATTERN_DET:
-                pattern_pos = uart_pattern_pop_pos(CONFIG_AT_UART_PORT);
+                pattern_pos = uart_pattern_pop_pos(esp_at_uart_port);
                 if (pattern_pos >= 0) {
                     data = (uint8_t *)malloc(pattern_pos + 3);
-                    uart_read_bytes(CONFIG_AT_UART_PORT,data,pattern_pos + 3,0);
+                    uart_read_bytes(esp_at_uart_port,data,pattern_pos + 3,0);
                     free(data);
                     data = NULL;
                 } else {
-                    uart_flush_input(CONFIG_AT_UART_PORT);
+                    uart_flush_input(esp_at_uart_port);
                     xQueueReset(esp_at_uart_queue);
                 }
-
                 esp_at_transmit_terminal();
                 break;
 #endif
+            case UART_FIFO_OVF:
+                retry_flag = pdFALSE;
+                while (xQueueReceive(esp_at_uart_queue, (void *)&event, (portTickType)0) == pdTRUE) {
+                    if ((event.type == UART_DATA) || (event.type == UART_BUFFER_FULL) || (event.type == UART_FIFO_OVF)) {
+                        // Put all data together to process
+                    } else {
+                        retry_flag = pdTRUE;
+                        break;
+                    }
+                }
+                esp_at_port_recv_data_notify(at_port_get_data_length(), portMAX_DELAY);
+                data_len = 0;
+                if (retry_flag == pdTRUE) {
+                    goto retry;
+                }
+                break;
+
             //Others
             default:
                 break;
@@ -193,7 +272,7 @@ static void at_uart_init(void)
 {
     at_nvm_uart_config_struct uart_nvm_config;
     uart_config_t uart_config = {
-        .baud_rate = CONFIG_AT_UART_DEFAULT_BAUDRATE,
+        .baud_rate = 115200,
         .data_bits = CONFIG_AT_UART_DEFAULT_DATABITS - 5,
         .parity = esp_at_uart_parity_table[CONFIG_AT_UART_DEFAULT_PARITY_BITS],
         .stop_bits = CONFIG_AT_UART_DEFAULT_STOPBITS,
@@ -201,10 +280,19 @@ static void at_uart_init(void)
         .rx_flow_ctrl_thresh = 122,
     };
 
-    int32_t tx_pin = CONFIG_AT_UART_PORT_TX_PIN;	
-    int32_t rx_pin = CONFIG_AT_UART_PORT_RX_PIN;
-    int32_t cts_pin = CONFIG_AT_UART_PORT_CTS_PIN;
-    int32_t rts_pin = CONFIG_AT_UART_PORT_RTS_PIN;
+    uart_intr_config_t intr_config = {
+        .intr_enable_mask = UART_RXFIFO_FULL_INT_ENA_M
+            | UART_RXFIFO_TOUT_INT_ENA_M
+            | UART_RXFIFO_OVF_INT_ENA_M,
+        .rxfifo_full_thresh = 100,
+        .rx_timeout_thresh = 10,
+        .txfifo_empty_intr_thresh = 10
+    };
+
+    int32_t tx_pin = CONFIG_AT_UART_PORT_TX_PIN_DEFAULT;	
+    int32_t rx_pin = CONFIG_AT_UART_PORT_RX_PIN_DEFAULT;
+    int32_t cts_pin = CONFIG_AT_UART_PORT_CTS_PIN_DEFAULT;
+    int32_t rts_pin = CONFIG_AT_UART_PORT_RTS_PIN_DEFAULT;
 
     char* data = NULL;
     const esp_partition_t * partition = esp_at_custom_partition_find(0x40, 0xff, "factory_param");
@@ -221,7 +309,7 @@ static void at_uart_init(void)
     }
 
     if (at_nvm_uart_config_get(&uart_nvm_config)) {
-        if ((uart_nvm_config.baudrate >= 80) && (uart_nvm_config.baudrate <= 5000000)) {
+        if ((uart_nvm_config.baudrate >= AT_UART_BAUD_RATE_MIN) && (uart_nvm_config.baudrate <= AT_UART_BAUD_RATE_MAX)) {
             uart_config.baud_rate = uart_nvm_config.baudrate;
         }
 
@@ -260,6 +348,18 @@ static void at_uart_init(void)
 
     if (data) {
         if ((data[0] == 0xFC) && (data[1] == 0xFC)) { // check magic flag, should be 0xfc 0xfc
+            if (data[5] != 0xFF) {
+#if defined(CONFIG_IDF_TARGET_ESP32)
+                assert((data[5] == 0) || (data[5] == 1) || (data[5] == 2));
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+                assert((data[5] == 0) || (data[5] == 1));
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+                assert((data[5] == 0) || (data[5] == 1));
+#elif defined(CONFIG_IDF_TARGET_ESP8266)
+                assert(data[5] == 0);
+#endif
+                esp_at_uart_port = data[5];
+            }
             if ((data[16] != 0xFF) && (data[17] != 0xFF)) {
                 tx_pin = data[16];
                 rx_pin = data[17];
@@ -291,17 +391,16 @@ static void at_uart_init(void)
         data = NULL;
     }
     //Set UART parameters
-    uart_param_config(CONFIG_AT_UART_PORT, &uart_config);
-
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
+    uart_param_config(esp_at_uart_port, &uart_config);
+#ifndef CONFIG_IDF_TARGET_ESP8266
     //Set UART pins,(-1: default pin, no change.)
-    uart_set_pin(CONFIG_AT_UART_PORT, tx_pin, rx_pin, rts_pin, cts_pin);
+    uart_set_pin(esp_at_uart_port, tx_pin, rx_pin, rts_pin, cts_pin);
     //Install UART driver, and get the queue.
-    uart_driver_install(CONFIG_AT_UART_PORT, 2048, 8192, 30,&esp_at_uart_queue,0);
-#elif defined(CONFIG_IDF_TARGET_ESP8266)
+    uart_driver_install(esp_at_uart_port, 2048, 8192, 30,&esp_at_uart_queue,0);
+#else
     //Install UART driver, and get the queue.
-    uart_driver_install(CONFIG_AT_UART_PORT, 2048, 2048, 10,&esp_at_uart_queue);
-    if ((tx_pin == 15) && (rx_pin == 13)) { // sgit wap 
+    uart_driver_install(esp_at_uart_port, 1024, 2048, 10,&esp_at_uart_queue, 0);
+    if ((tx_pin == 15) && (rx_pin == 13)) {         // swap pin
         uart_enable_swap();
         assert((cts_pin == -1) || (cts_pin == 3));
         assert((rts_pin == -1) || (rts_pin == 1));
@@ -309,7 +408,15 @@ static void at_uart_init(void)
         assert((tx_pin == 1) && (rx_pin == 3));
     }
 #endif
-    xTaskCreate(uart_task, "uTask", 2048, (void*)CONFIG_AT_UART_PORT, 1, NULL);
+    uart_intr_config(esp_at_uart_port, &intr_config);
+
+    // set actual uart pins
+    s_at_uart_port_pin.tx = tx_pin;
+    s_at_uart_port_pin.rx = rx_pin;
+    s_at_uart_port_pin.cts = cts_pin;
+    s_at_uart_port_pin.rts = rts_pin;
+
+    xTaskCreate(uart_task, "uTask", 1024, (void*)esp_at_uart_port, 1, NULL);
 }
 
 static bool at_nvm_uart_config_set (at_nvm_uart_config_struct *uart_config)
@@ -398,7 +505,7 @@ static uint8_t at_setupCmdUart(uint8_t para_num)
     if (esp_at_get_para_as_digit (cnt++,&value) != ESP_AT_PARA_PARSE_RESULT_OK) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    if ((value < 80) || (value > 5000000)) {
+    if ((value < AT_UART_BAUD_RATE_MIN) || (value > AT_UART_BAUD_RATE_MAX)) {
         return ESP_AT_RESULT_CODE_ERROR;
     }
     uart_config.baudrate = value;
@@ -427,7 +534,6 @@ static uint8_t at_setupCmdUart(uint8_t para_num)
     } else {
         return ESP_AT_RESULT_CODE_ERROR;
     }
-    uart_config.parity = value;
 
     if (esp_at_get_para_as_digit (cnt++,&value) != ESP_AT_PARA_PARSE_RESULT_OK) {
         return ESP_AT_RESULT_CODE_ERROR;
@@ -444,13 +550,12 @@ static uint8_t at_setupCmdUart(uint8_t para_num)
     }
     esp_at_response_result(ESP_AT_RESULT_CODE_OK);
 
-    uart_wait_tx_done(CONFIG_AT_UART_PORT,portMAX_DELAY);
-    uart_set_baudrate(CONFIG_AT_UART_PORT,uart_config.baudrate);
-    uart_set_word_length(CONFIG_AT_UART_PORT,uart_config.data_bits);
-    uart_set_stop_bits(CONFIG_AT_UART_PORT,uart_config.stop_bits);
-    uart_set_parity(CONFIG_AT_UART_PORT,uart_config.parity);
-    uart_set_hw_flow_ctrl(CONFIG_AT_UART_PORT,uart_config.flow_control,120);
-
+    uart_wait_tx_done(esp_at_uart_port,portMAX_DELAY);
+    uart_set_baudrate(esp_at_uart_port,uart_config.baudrate);
+    uart_set_word_length(esp_at_uart_port,uart_config.data_bits);
+    uart_set_stop_bits(esp_at_uart_port,uart_config.stop_bits);
+    uart_set_parity(esp_at_uart_port,uart_config.parity);
+    uart_set_hw_flow_ctrl(esp_at_uart_port,uart_config.flow_control,120);
     return ESP_AT_RESULT_CODE_PROCESS_DONE;
 }
 
@@ -474,11 +579,11 @@ static uint8_t at_queryCmdUart (uint8_t *cmd_name)
 
     uint8_t buffer[64];
 
-    uart_get_baudrate(CONFIG_AT_UART_PORT,&baudrate);
-    uart_get_word_length(CONFIG_AT_UART_PORT,&data_bits);
-    uart_get_stop_bits(CONFIG_AT_UART_PORT,&stop_bits);
-    uart_get_parity(CONFIG_AT_UART_PORT,&parity);
-    uart_get_hw_flow_ctrl(CONFIG_AT_UART_PORT,&flow_control);
+    uart_get_baudrate(esp_at_uart_port,&baudrate);
+    uart_get_word_length(esp_at_uart_port,&data_bits);
+    uart_get_stop_bits(esp_at_uart_port,&stop_bits);
+    uart_get_parity(esp_at_uart_port,&parity);
+    uart_get_hw_flow_ctrl(esp_at_uart_port,&flow_control);
 
     data_bits += 5;
     if (UART_PARITY_DISABLE == parity) {
@@ -530,13 +635,38 @@ static esp_at_cmd_struct at_custom_cmd[] = {
 
 void at_status_callback (esp_at_status_type status)
 {
-#if defined(CONFIG_TARGET_PLATFORM_ESP32)
+    /**
+     * ESP8266 CAN NOT provide uart_enable_pattern_det_baud_intr() feature due to hardware reason
+    */
+#ifndef CONFIG_IDF_TARGET_ESP8266
     switch (status) {
     case ESP_AT_STATUS_NORMAL:
-        uart_disable_pattern_det_intr(CONFIG_AT_UART_PORT);
+        uart_disable_pattern_det_intr(esp_at_uart_port);
         break;
-    case ESP_AT_STATUS_TRANSMIT:
-        uart_enable_pattern_det_intr(CONFIG_AT_UART_PORT, '+', 3, ((APB_CLK_FREQ*20)/1000),((APB_CLK_FREQ*20)/1000), ((APB_CLK_FREQ*20)/1000));
+
+    case ESP_AT_STATUS_TRANSMIT: {
+        /**
+         * As the implement of API uart_enable_pattern_det_baud_intr() in esp-idf,
+         * the last three timeout parameters is different on ESP32 and non ESP32 platform.
+         *
+         * That is, on ESP32 platform, it uses the APB clocks as the unit;
+         * on non ESP32 platform (ESP32-S2, ESP32-C3, ..), it uses the UART baud rate clocks as the unit.
+         *
+         * Notes:
+         * on non ESP32 platform, due to the value of input parameters have a limit of 0xFFFF (see as macro: UART_RX_GAP_TOUT_V..),
+         * so the maximum uart baud rate is recommended to be less than (0xFFFF * 1000 / AT_UART_PATTERN_TIMEOUT_MS) = 3276750 ~= 3.2Mbps
+         * otherwise, this uart_enable_pattern_det_baud_intr() will not work.
+        */
+#ifdef CONFIG_IDF_TARGET_ESP32
+        int apb_clocks = (uint32_t)APB_CLK_FREQ * AT_UART_PATTERN_TIMEOUT_MS / 1000;
+        uart_enable_pattern_det_baud_intr(esp_at_uart_port, '+', 3, apb_clocks, apb_clocks, apb_clocks);
+#else
+        uint32_t uart_baud = 0;
+        uart_get_baudrate(esp_at_uart_port, &uart_baud);
+        int uart_clocks = (uint32_t)uart_baud * AT_UART_PATTERN_TIMEOUT_MS / 1000;
+        uart_enable_pattern_det_baud_intr(esp_at_uart_port, '+', 3, uart_clocks, uart_clocks, uart_clocks);
+#endif
+    }
         break;
     }
 #endif
@@ -545,20 +675,28 @@ void at_status_callback (esp_at_status_type status)
 void at_pre_deepsleep_callback (void)
 {
     /* Do something before deep sleep
-     * Set uart pin for power saving
+     * Set uart pin for power saving, in case of leakage current
     */
-    gpio_set_direction(CONFIG_AT_UART_PORT_TX_PIN,0);
-    gpio_set_direction(CONFIG_AT_UART_PORT_RX_PIN,0);
-    gpio_set_direction(CONFIG_AT_UART_PORT_RTS_PIN,0);
-    gpio_set_direction(CONFIG_AT_UART_PORT_CTS_PIN,0);
+    if (s_at_uart_port_pin.tx >= 0) {
+        gpio_set_direction(s_at_uart_port_pin.tx, GPIO_MODE_DISABLE);
+    }
+    if (s_at_uart_port_pin.rx >= 0) {
+        gpio_set_direction(s_at_uart_port_pin.rx, GPIO_MODE_DISABLE);
+    }
+    if (s_at_uart_port_pin.cts >= 0) {
+        gpio_set_direction(s_at_uart_port_pin.cts, GPIO_MODE_DISABLE);
+    }
+    if (s_at_uart_port_pin.rts >= 0) {
+        gpio_set_direction(s_at_uart_port_pin.rts, GPIO_MODE_DISABLE);
+    }
 }
 
 void at_pre_restart_callback (void)
 {
     /* Do something before restart
     */
-    uart_disable_rx_intr(CONFIG_AT_UART_PORT);
-    esp_at_port_wait_write_complete(portMAX_DELAY);
+    uart_disable_rx_intr(esp_at_uart_port);
+    esp_at_port_wait_write_complete(ESP_AT_PORT_TX_WAIT_MS_MAX);
 }
 
 void at_interface_init (void)
@@ -588,3 +726,4 @@ void at_custom_init(void)
     esp_at_custom_cmd_array_regist (at_custom_cmd, sizeof(at_custom_cmd)/sizeof(at_custom_cmd[0]));
     esp_at_port_write_data((uint8_t *)"\r\nready\r\n",strlen("\r\nready\r\n"));
 }
+#endif

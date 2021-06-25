@@ -37,6 +37,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#ifdef CONFIG_AT_BASE_ON_SDIO
 #include "driver/sdio_slave.h"
 
 #include "soc/slc_struct.h"
@@ -102,7 +103,7 @@ static int32_t at_sdio_read_data(uint8_t* data, int32_t len)
 {
     uint32_t copy_len = 0;
     if (data == NULL || len < 0) {
-        ESP_LOGE(TAG , "Cannot get read data address.");
+        ESP_LOGI(TAG , "Cannot get read data address.");
         return -1;
     }
 
@@ -123,12 +124,12 @@ static int32_t at_sdio_read_data(uint8_t* data, int32_t len)
         esp_at_sdio_list_t* p_list = pHead;
 
         if (len < p_list->left_len) {
-            memcpy(data, p_list->pbuf + p_list->pos, len);
+            memcpy(data + copy_len, p_list->pbuf + p_list->pos, len);
             p_list->pos += len;
             p_list->left_len -= len;
             copy_len += len;
         } else {
-            memcpy(data, p_list->pbuf + p_list->pos, p_list->left_len);
+            memcpy(data + copy_len, p_list->pbuf + p_list->pos, p_list->left_len);
             p_list->pos += p_list->left_len;
             copy_len += p_list->left_len;
             p_list->left_len = 0;
@@ -237,3 +238,4 @@ void at_custom_init(void)
 
     xTaskCreate(at_sdio_recv_task , "at_sdio_recv_task" , 4096 , NULL , 2 , NULL);
 }
+#endif
